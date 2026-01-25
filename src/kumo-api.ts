@@ -36,6 +36,7 @@ export class KumoAPI {
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private streamingHealthCheckInterval: number = 30000; // 30s default
   private isStreamingHealthy: boolean = false;
+  private isReconnecting: boolean = false; // Suppresses health notifications during planned reconnects
 
   // Rate limiting and retry tracking
   private refreshRetryCount: number = 0;
@@ -562,7 +563,9 @@ export class KumoAPI {
     }
 
     try {
-      this.log.info('Starting streaming connection...');
+      // Use debug level for routine reconnects (token refresh), info for initial connection
+      const logLevel = this.isReconnecting ? 'debug' : 'info';
+      this.log[logLevel]('Starting streaming connection...');
 
       this.socket = io(SOCKET_BASE_URL, {
         transports: ['polling', 'websocket'],
@@ -575,7 +578,14 @@ export class KumoAPI {
       });
 
       this.socket.on('connect', () => {
-        this.log.info(`✓ Streaming connected (ID: ${this.socket?.id})`);
+        // Use debug level for routine reconnects, info for initial connection
+        const isRoutineReconnect = this.isReconnecting;
+
+        if (isRoutineReconnect) {
+          this.log.debug(`Streaming reconnected (ID: ${this.socket?.id})`);
+        } else {
+          this.log.info(`✓ Streaming connected (ID: ${this.socket?.id})`);
+        }
 
         // Subscribe to all devices (with validation)
         for (const deviceSerial of deviceSerials) {
@@ -592,9 +602,11 @@ export class KumoAPI {
         this.notifyHealthChange(false, true);
         this.startHealthChecks();
 
-        // LOG: Streaming started
-        this.log.info('✓ Streaming connection established');
-        this.log.info(`Monitoring ${deviceSerials.length} device(s) for real-time updates`);
+        // LOG: Streaming started (only for initial connection)
+        if (!isRoutineReconnect) {
+          this.log.info('✓ Streaming connection established');
+          this.log.info(`Monitoring ${deviceSerials.length} device(s) for real-time updates`);
+        }
       });
 
       this.socket.on('device_update', (data: any) => {
@@ -706,7 +718,27 @@ export class KumoAPI {
    */
   private notifyHealthChange(wasHealthy: boolean, isHealthy: boolean): void {
     if (wasHealthy !== isHealthy) {
-      this.log.info(`Streaming health changed: ${wasHealthy ? 'healthy' : 'unhealthy'} → ${isHealthy ? 'healthy' : 'unhealthy'}`);
+      // Suppress "unhealthy" notifications during planned reconnections (token refresh)
+      if (this.isReconnecting && !isHealthy) {
+        this.log.debug('Suppressing unhealthy notification during planned reconnect');
+        return;
+      }
+
+      // Track if this is a routine reconnect before clearing the flag
+      const isRoutineReconnect = this.isReconnecting;
+
+      // Clear reconnecting flag when we become healthy
+      if (isHealthy) {
+        this.isReconnecting = false;
+      }
+
+      // Use debug level for routine reconnects, info for real state changes
+      if (isRoutineReconnect) {
+        this.log.debug(`Streaming health restored after token refresh`);
+      } else {
+        this.log.info(`Streaming health changed: ${wasHealthy ? 'healthy' : 'unhealthy'} → ${isHealthy ? 'healthy' : 'unhealthy'}`);
+      }
+
       for (const callback of this.streamingHealthCallbacks) {
         callback(isHealthy);
       }
@@ -775,15 +807,22 @@ export class KumoAPI {
 
     this.log.debug('Reconnecting streaming with refreshed token...');
 
-    // Disconnect current socket if connected (suppress disconnect event logging)
+    // Set flag to suppress health notifications during planned reconnect
+    this.isReconnecting = true;
+
+    // Disconnect current socket if connected
     if (this.socket) {
-      // Remove listeners before disconnect to avoid spurious "disconnected" warnings
-      this.socket.removeAllListeners('disconnect');
+      // Stop health checks to prevent false "unhealthy" detection during reconnect
+      this.stopHealthChecks();
+
+      // Remove listeners before disconnect to avoid spurious warnings
+      this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
     }
 
     // Start streaming with new token (it will use this.accessToken)
+    // This will restart health checks once connected and clear isReconnecting flag
     await this.startStreaming(deviceSerials);
   }
 }
