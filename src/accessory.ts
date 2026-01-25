@@ -14,6 +14,7 @@ export class KumoThermostatAccessory {
   private hasHumiditySensor: boolean = false;
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'none' = 'none';
+  private hasReceivedValidUpdate: boolean = false;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -183,6 +184,7 @@ export class KumoThermostatAccessory {
       };
 
       this.currentStatus = status;
+      this.hasReceivedValidUpdate = true; // Mark that we've received at least one valid complete update
       this.platform.log.debug(`${this.accessory.displayName}: ${status.roomTemp}°C (target: ${this.getTargetTempFromStatus(status)}°C, mode: ${status.operationMode})`);
 
       // Update all characteristics
@@ -293,14 +295,11 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
+    // Never block on API calls - return cached state or default immediately
+    // Updates will come from streaming/polling and update the characteristic
     if (!this.currentStatus) {
-      // If we don't have status yet, fetch it
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      } else {
-        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
-      }
+      this.platform.log.debug('No status available yet for getCurrentHeatingCoolingState, returning OFF');
+      return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
     }
 
     const state = this.mapToCurrentHeatingCoolingState(this.currentStatus);
@@ -309,13 +308,10 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetHeatingCoolingState(): Promise<CharacteristicValue> {
+    // Never block on API calls - return cached state or default immediately
     if (!this.currentStatus) {
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      } else {
-        return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
-      }
+      this.platform.log.debug('No status available yet for getTargetHeatingCoolingState, returning OFF');
+      return this.platform.Characteristic.TargetHeatingCoolingState.OFF;
     }
 
     const state = this.mapToTargetHeatingCoolingState(this.currentStatus);
@@ -373,21 +369,16 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentTemperature(): Promise<CharacteristicValue> {
+    // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      } else {
-        // Initial state - no data yet, return default silently
-        this.platform.log.debug('No status available yet for getCurrentTemperature, returning default');
-        return 20; // Default fallback temperature
-      }
+      this.platform.log.debug('No status available yet for getCurrentTemperature, returning default');
+      return 20; // Default fallback temperature
     }
 
     const temp = this.currentStatus.roomTemp;
     if (temp === undefined || temp === null || isNaN(temp)) {
-      // Only warn if we have status but invalid temp (not initial state)
-      if (this.lastUpdateSource !== 'none') {
+      // Only warn if we've received valid updates before (not during initial state)
+      if (this.hasReceivedValidUpdate) {
         this.platform.log.warn(`Invalid roomTemp value for ${this.accessory.displayName}:`, temp);
       }
       return 20; // Default fallback temperature
@@ -398,21 +389,16 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetTemperature(): Promise<CharacteristicValue> {
+    // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
-      const status = await this.kumoAPI.getDeviceStatus(this.deviceSerial);
-      if (status) {
-        this.currentStatus = status;
-      } else {
-        // Initial state - no data yet, return default silently
-        this.platform.log.debug('No status available yet for getTargetTemperature, returning default');
-        return 20; // Default fallback temperature
-      }
+      this.platform.log.debug('No status available yet for getTargetTemperature, returning default');
+      return 20; // Default fallback temperature
     }
 
     const temp = this.getTargetTempFromStatus(this.currentStatus);
     if (temp === undefined || temp === null || isNaN(temp)) {
-      // Only warn if we have status but invalid temp (not initial state)
-      if (this.lastUpdateSource !== 'none') {
+      // Only warn if we've received valid updates before (not during initial state)
+      if (this.hasReceivedValidUpdate) {
         this.platform.log.warn(`Invalid target temperature value for ${this.accessory.displayName}:`, temp);
       }
       return 20; // Default fallback temperature

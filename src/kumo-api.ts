@@ -30,15 +30,11 @@ export class KumoAPI {
   private socket: Socket | null = null;
   private streamingEnabled: boolean = true;
   private deviceUpdateCallbacks: Map<string, DeviceUpdateCallback> = new Map();
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 5;
 
   // Streaming health tracking
-  private lastStreamingUpdate: Map<string, number> = new Map();
   private streamingHealthCallbacks: Set<(isHealthy: boolean) => void> = new Set();
   private healthCheckTimer: NodeJS.Timeout | null = null;
   private streamingHealthCheckInterval: number = 30000; // 30s default
-  private streamingStaleThreshold: number = 60000; // 60s default
   private isStreamingHealthy: boolean = false;
 
   // Rate limiting and retry tracking
@@ -144,14 +140,28 @@ export class KumoAPI {
       this.accessToken = data.token.access;
       this.refreshToken = data.token.refresh;
 
+      // Track if this was a recovery scenario (for streaming reconnect)
+      const wasRecovery = this.loginRetryCount > 0 || this.refreshRetryCount > 0 || this.socket?.connected;
+
+      // Log recovery from rate limiting at INFO level
+      if (this.loginRetryCount > 0) {
+        this.log.info(`Login recovered after ${this.loginRetryCount} retry attempt(s)`);
+      } else {
+        this.log.info('Successfully logged in to Kumo Cloud API');
+      }
+
       // Reset retry counters on successful login
       this.loginRetryCount = 0;
       this.refreshRetryCount = 0;
 
-      // JWT tokens typically expire in 20 minutes, we'll refresh at 15 minutes
+      // JWT tokens expire in 20 minutes, we'll refresh at 15 minutes (20 min - 5 min buffer)
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
 
-      this.log.info('Successfully logged in to Kumo Cloud API');
+      // Reconnect streaming if this was a recovery (re-login after failures)
+      // The old token is now invalid, so we need fresh connection
+      if (wasRecovery) {
+        await this.reconnectStreaming();
+      }
 
       // Set up automatic token refresh
       this.scheduleTokenRefresh();
@@ -176,7 +186,7 @@ export class KumoAPI {
       clearTimeout(this.refreshTimer);
     }
 
-    // Schedule refresh 5 minutes before expiry (TOKEN_REFRESH_INTERVAL is 15 min, so this is at ~10 min mark)
+    // Schedule refresh 5 minutes before expiry (TOKEN_REFRESH_INTERVAL is 20 min, so this is at 15 min mark)
     const refreshIn = TOKEN_REFRESH_INTERVAL - (5 * 60 * 1000);
 
     this.refreshTimer = setTimeout(async () => {
@@ -255,10 +265,20 @@ export class KumoAPI {
       this.refreshToken = data.refresh;
       this.tokenExpiresAt = Date.now() + TOKEN_REFRESH_INTERVAL;
 
+      // Log recovery from rate limiting at INFO level (not just debug)
+      if (this.refreshRetryCount > 0) {
+        this.log.info(`Token refresh recovered after ${this.refreshRetryCount} retry attempt(s)`);
+      } else {
+        this.log.debug('Access token refreshed successfully');
+      }
+
       // Reset retry count on success
       this.refreshRetryCount = 0;
 
-      this.log.debug('Access token refreshed successfully');
+      // Always reconnect streaming after token refresh to ensure socket uses fresh token
+      // Socket.IO connection headers are set at connection time, so we need to reconnect
+      // to use the new token (otherwise socket would keep using the old, expired token)
+      await this.reconnectStreaming();
 
       // Schedule next refresh
       this.scheduleTokenRefresh();
@@ -546,6 +566,7 @@ export class KumoAPI {
 
       this.socket = io(SOCKET_BASE_URL, {
         transports: ['polling', 'websocket'],
+        timeout: 20000, // 20 second connection timeout
         extraHeaders: {
           'Authorization': `Bearer ${this.accessToken}`,
           'Accept': '*/*',
@@ -555,17 +576,15 @@ export class KumoAPI {
 
       this.socket.on('connect', () => {
         this.log.info(`✓ Streaming connected (ID: ${this.socket?.id})`);
-        this.reconnectAttempts = 0;
 
-        // Subscribe to all devices
+        // Subscribe to all devices (with validation)
         for (const deviceSerial of deviceSerials) {
+          if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
+            this.log.warn(`Skipping invalid device serial: ${deviceSerial}`);
+            continue;
+          }
           this.log.debug(`Subscribing to device: ${deviceSerial}`);
           this.socket?.emit('subscribe', deviceSerial);
-        }
-
-        // Initialize timestamps for all subscribed devices
-        for (const deviceSerial of deviceSerials) {
-          this.lastStreamingUpdate.set(deviceSerial, Date.now());
         }
 
         // Mark as healthy and start health checks
@@ -583,9 +602,6 @@ export class KumoAPI {
         if (!deviceSerial) {
           return;
         }
-
-        // Track update timestamp for health monitoring
-        this.updateStreamingTimestamp(deviceSerial);
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
@@ -612,13 +628,9 @@ export class KumoAPI {
         // Stop health checks while disconnected
         this.stopHealthChecks();
 
-        // Attempt to reconnect if not a manual disconnect
-        if (reason !== 'io client disconnect' && this.reconnectAttempts < this.maxReconnectAttempts) {
-          this.reconnectAttempts++;
-          this.log.info(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          this.log.error('Max reconnect attempts reached - polling will handle updates');
-        }
+        // Socket.IO handles reconnection automatically with exponential backoff
+        // Our health monitoring will detect when connection is restored
+        // and polling fallback will cover updates in the meantime
       });
 
       this.socket.on('connect_error', (error) => {
@@ -653,12 +665,11 @@ export class KumoAPI {
   }
 
   /**
-   * Set streaming health check intervals
+   * Set streaming health check interval
    */
-  setStreamingHealthConfig(checkInterval: number, staleThreshold: number): void {
-    this.streamingHealthCheckInterval = checkInterval * 1000;
-    this.streamingStaleThreshold = staleThreshold * 1000;
-    this.log.debug(`Streaming health config: check every ${checkInterval}s, stale after ${staleThreshold}s`);
+  setStreamingHealthCheckInterval(checkIntervalSec: number): void {
+    this.streamingHealthCheckInterval = checkIntervalSec * 1000;
+    this.log.debug(`Streaming health check interval: ${checkIntervalSec}s`);
   }
 
   /**
@@ -673,13 +684,6 @@ export class KumoAPI {
    */
   getStreamingHealth(): boolean {
     return this.isStreamingHealthy;
-  }
-
-  /**
-   * Update last streaming update timestamp for a device
-   */
-  private updateStreamingTimestamp(deviceSerial: string): void {
-    this.lastStreamingUpdate.set(deviceSerial, Date.now());
   }
 
   /**
@@ -743,7 +747,6 @@ export class KumoAPI {
     // Clean up streaming health monitoring
     this.stopHealthChecks();
     this.streamingHealthCallbacks.clear();
-    this.lastStreamingUpdate.clear();
     this.log.debug('Streaming health monitoring stopped');
 
     if (this.socket) {
@@ -751,5 +754,36 @@ export class KumoAPI {
       this.socket.disconnect();
       this.socket = null;
     }
+  }
+
+  /**
+   * Reconnect streaming with the current (refreshed) access token.
+   * This is called after every token refresh to ensure the socket uses the new token.
+   * Socket.IO headers are set at connection time, so reconnection is required.
+   */
+  async reconnectStreaming(): Promise<void> {
+    if (!this.streamingEnabled) {
+      return;
+    }
+
+    // Get the device serials we're subscribed to
+    const deviceSerials = Array.from(this.deviceUpdateCallbacks.keys());
+    if (deviceSerials.length === 0) {
+      this.log.debug('No devices subscribed, skipping streaming reconnect');
+      return;
+    }
+
+    this.log.debug('Reconnecting streaming with refreshed token...');
+
+    // Disconnect current socket if connected (suppress disconnect event logging)
+    if (this.socket) {
+      // Remove listeners before disconnect to avoid spurious "disconnected" warnings
+      this.socket.removeAllListeners('disconnect');
+      this.socket.disconnect();
+      this.socket = null;
+    }
+
+    // Start streaming with new token (it will use this.accessToken)
+    await this.startStreaming(deviceSerials);
   }
 }

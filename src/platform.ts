@@ -26,6 +26,11 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   private isStreamingHealthy: boolean = false;
   private isDegradedMode: boolean = false;
 
+  // Hysteresis for mode switching - prevents rapid oscillation on flaky connections
+  private readonly modeChangeHysteresisMs: number = 10000; // 10 second stability required
+  private pendingModeChange: NodeJS.Timeout | null = null;
+  private pendingModeHealthy: boolean | null = null;
+
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
@@ -75,8 +80,7 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
     // Configure streaming health monitoring
     const healthCheckInterval = kumoConfig.streamingHealthCheckInterval || 30;
-    const staleThreshold = kumoConfig.streamingStaleThreshold || 60;
-    this.kumoAPI.setStreamingHealthConfig(healthCheckInterval, staleThreshold);
+    this.kumoAPI.setStreamingHealthCheckInterval(healthCheckInterval);
 
     // Register for streaming health changes
     this.kumoAPI.onStreamingHealthChange((isHealthy: boolean) => {
@@ -244,7 +248,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
 
         // Log startup configuration summary
         const healthCheckInterval = this.kumoConfig.streamingHealthCheckInterval || 30;
-        const staleThreshold = this.kumoConfig.streamingStaleThreshold || 60;
 
         this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         this.log.info('Mitsubishi Comfort Plugin Configuration');
@@ -254,7 +257,6 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
         this.log.info(`Normal poll interval: ${(this.kumoConfig.pollInterval || 30)}s`);
         this.log.info(`Degraded poll interval: ${this.degradedPollInterval / 1000}s`);
         this.log.info(`Health check interval: ${healthCheckInterval}s`);
-        this.log.info(`Stale threshold: ${staleThreshold}s`);
         this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
         if (streamingStarted) {
@@ -345,26 +347,65 @@ export class KumoV3Platform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Handle streaming health state changes
+   * Handle streaming health state changes with hysteresis
+   *
+   * Hysteresis prevents rapid mode switching on flaky connections:
+   * - Entering degraded mode: IMMEDIATE (we need polling fallback right away)
+   * - Exiting degraded mode: DELAYED (wait for stable connection before stopping polling)
    */
   private handleStreamingHealthChange(isHealthy: boolean): void {
     const wasHealthy = this.isStreamingHealthy;
     this.isStreamingHealthy = isHealthy;
 
-    // If streaming became unhealthy, switch to degraded mode
+    // If streaming became unhealthy, switch to degraded mode IMMEDIATELY
+    // (No hysteresis - we need polling fallback right away)
     if (wasHealthy && !isHealthy) {
+      // Cancel any pending mode change (e.g., pending exit from degraded mode)
+      if (this.pendingModeChange) {
+        clearTimeout(this.pendingModeChange);
+        this.pendingModeChange = null;
+        this.pendingModeHealthy = null;
+        this.log.debug('Cancelled pending mode change due to new disconnect');
+      }
+
       this.log.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       this.log.warn('⚠ STREAMING INTERRUPTED');
       this.log.warn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       this.enterDegradedMode();
     }
 
-    // If streaming became healthy, exit degraded mode
+    // If streaming became healthy, schedule exit from degraded mode WITH HYSTERESIS
+    // (Wait for stable connection before stopping polling fallback)
     if (!wasHealthy && isHealthy) {
-      this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      this.log.info('✓ STREAMING RESUMED');
-      this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      this.exitDegradedMode();
+      // If already pending the same mode change, do nothing
+      if (this.pendingModeHealthy === true) {
+        this.log.debug('Mode change to healthy already pending, waiting for stability...');
+        return;
+      }
+
+      // Cancel any conflicting pending mode change
+      if (this.pendingModeChange) {
+        clearTimeout(this.pendingModeChange);
+      }
+
+      this.pendingModeHealthy = true;
+      const hysteresisSec = this.modeChangeHysteresisMs / 1000;
+      this.log.info(`Streaming reconnected - waiting ${hysteresisSec}s for stable connection...`);
+
+      this.pendingModeChange = setTimeout(() => {
+        this.pendingModeChange = null;
+        this.pendingModeHealthy = null;
+
+        // Double-check health is still good before switching
+        if (this.isStreamingHealthy) {
+          this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          this.log.info('✓ STREAMING RESUMED (stable)');
+          this.log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          this.exitDegradedMode();
+        } else {
+          this.log.warn('Streaming became unhealthy during stability check, staying in degraded mode');
+        }
+      }, this.modeChangeHysteresisMs);
     }
   }
 
