@@ -80,6 +80,20 @@ export interface DeviceStatus {
   spAuto: number | null;
 }
 
+export interface DeviceProfile {
+  numberOfFanSpeeds: number;
+  hasFanSpeedAuto: boolean;
+  hasModeDry: boolean;
+  hasModeHeat: boolean;
+  hasModeVent: boolean;
+  hasVaneDir: boolean;
+  hasVaneSwing: boolean;
+  hasDefrost: boolean;
+  hasStandby: boolean;
+  minimumSetPoints: { cool: number; heat: number; auto: number };
+  maximumSetPoints: { cool: number; heat: number; auto: number };
+}
+
 export interface Commands {
   spHeat?: number;
   spCool?: number;

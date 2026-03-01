@@ -1,7 +1,8 @@
-import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
+import { Service, PlatformAccessory, CharacteristicValue, HAPStatus } from 'homebridge';
+import { HapStatusError } from 'hap-nodejs';
 import { KumoV3Platform } from './platform';
 import { KumoAPI } from './kumo-api';
-import { POLL_INTERVAL, DeviceStatus, Zone } from './settings';
+import { POLL_INTERVAL, DeviceStatus, DeviceProfile, Zone } from './settings';
 
 export class KumoThermostatAccessory {
   private service: Service;
@@ -15,6 +16,8 @@ export class KumoThermostatAccessory {
   private lastUpdateTimestamp: number = 0;
   private lastUpdateSource: 'streaming' | 'polling' | 'none' = 'none';
   private hasReceivedValidUpdate: boolean = false;
+  private deviceProfile: DeviceProfile | null = null;
+  private isDeviceOnline: boolean = true;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -63,6 +66,56 @@ export class KumoThermostatAccessory {
     // Register for streaming updates
     this.kumoAPI.subscribeToDevice(this.deviceSerial, this.handleStreamingUpdate.bind(this));
     this.platform.log.debug(`Registered streaming callback for ${this.deviceSerial}`);
+
+    // Register for profile updates (setpoint limits)
+    this.kumoAPI.onDeviceProfileUpdate((serial, profile) => {
+      if (serial === this.deviceSerial) {
+        this.applyDeviceProfile(profile);
+      }
+    });
+
+    // Register for connection status updates
+    this.kumoAPI.onDeviceConnectionStatusChange((serial, connected) => {
+      if (serial === this.deviceSerial) {
+        if (this.isDeviceOnline !== connected) {
+          this.isDeviceOnline = connected;
+          if (connected) {
+            this.platform.log.info(`${this.accessory.displayName} is back online`);
+          } else {
+            this.platform.log.warn(`${this.accessory.displayName} is offline`);
+          }
+        }
+      }
+    });
+  }
+
+  private applyDeviceProfile(profile: DeviceProfile): void {
+    this.deviceProfile = profile;
+
+    // Calculate broadest valid temperature range across all modes
+    const minTemp = Math.min(
+      profile.minimumSetPoints.cool,
+      profile.minimumSetPoints.heat,
+      profile.minimumSetPoints.auto,
+    );
+    const maxTemp = Math.max(
+      profile.maximumSetPoints.cool,
+      profile.maximumSetPoints.heat,
+      profile.maximumSetPoints.auto,
+    );
+
+    this.service.getCharacteristic(this.platform.Characteristic.TargetTemperature)
+      .setProps({
+        minValue: minTemp,
+        maxValue: maxTemp,
+        minStep: 0.5,
+      });
+
+    const minTempF = (minTemp * 9 / 5) + 32;
+    const maxTempF = (maxTemp * 9 / 5) + 32;
+    this.platform.log.info(
+      `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
+    );
   }
 
   // Handle streaming updates
@@ -294,7 +347,15 @@ export class KumoThermostatAccessory {
     return 20;
   }
 
+  private checkDeviceOnline(): void {
+    if (!this.isDeviceOnline) {
+      throw new HapStatusError(HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+  }
+
   async getCurrentHeatingCoolingState(): Promise<CharacteristicValue> {
+    this.checkDeviceOnline();
+
     // Never block on API calls - return cached state or default immediately
     // Updates will come from streaming/polling and update the characteristic
     if (!this.currentStatus) {
@@ -308,6 +369,8 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetHeatingCoolingState(): Promise<CharacteristicValue> {
+    this.checkDeviceOnline();
+
     // Never block on API calls - return cached state or default immediately
     if (!this.currentStatus) {
       this.platform.log.debug('No status available yet for getTargetHeatingCoolingState, returning OFF');
@@ -369,6 +432,8 @@ export class KumoThermostatAccessory {
   }
 
   async getCurrentTemperature(): Promise<CharacteristicValue> {
+    this.checkDeviceOnline();
+
     // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
       this.platform.log.debug('No status available yet for getCurrentTemperature, returning default');
@@ -389,6 +454,8 @@ export class KumoThermostatAccessory {
   }
 
   async getTargetTemperature(): Promise<CharacteristicValue> {
+    this.checkDeviceOnline();
+
     // Never block on API calls - return cached or default value immediately
     if (!this.currentStatus) {
       this.platform.log.debug('No status available yet for getTargetTemperature, returning default');

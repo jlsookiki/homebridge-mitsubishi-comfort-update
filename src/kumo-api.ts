@@ -10,13 +10,16 @@ import {
   Site,
   Zone,
   DeviceStatus,
+  DeviceProfile,
   Commands,
   SendCommandRequest,
   SendCommandResponse,
 } from './settings';
 
-// Event callback type for device updates
+// Event callback types
 export type DeviceUpdateCallback = (deviceSerial: string, status: Partial<DeviceStatus>) => void;
+export type DeviceProfileCallback = (deviceSerial: string, profile: DeviceProfile) => void;
+export type DeviceConnectionCallback = (deviceSerial: string, connected: boolean) => void;
 
 export class KumoAPI {
   private accessToken: string | null = null;
@@ -30,6 +33,12 @@ export class KumoAPI {
   private socket: Socket | null = null;
   private streamingEnabled: boolean = true;
   private deviceUpdateCallbacks: Map<string, DeviceUpdateCallback> = new Map();
+
+  // Device profile and connection status
+  private deviceProfiles: Map<string, DeviceProfile> = new Map();
+  private deviceConnectionStatus: Map<string, boolean> = new Map();
+  private deviceProfileCallbacks: Set<DeviceProfileCallback> = new Set();
+  private deviceConnectionCallbacks: Set<DeviceConnectionCallback> = new Set();
 
   // Streaming health tracking
   private streamingHealthCallbacks: Set<(isHealthy: boolean) => void> = new Set();
@@ -607,6 +616,33 @@ export class KumoAPI {
         this.notifyHealthChange(false, true);
         this.startHealthChecks();
 
+        // Account-level subscribe (required for adapter_update events)
+        const userId = this.getUserIdFromToken();
+        if (userId) {
+          this.log.debug(`Account-level subscribe with user ID: ${userId}`);
+          this.socket?.emit('subscribe', '', userId);
+        }
+
+        // On initial connection, request device profiles and status
+        if (!isRoutineReconnect) {
+          for (const deviceSerial of deviceSerials) {
+            if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
+              continue;
+            }
+            this.socket?.emit('force_adapter_request', deviceSerial, 'iuStatus');
+            this.socket?.emit('force_adapter_request', deviceSerial, 'profile');
+            this.socket?.emit('force_adapter_request', deviceSerial, 'adapterStatus');
+          }
+          // Request connection status for all devices
+          this.socket?.emit('device_status_v2', '');
+          for (const deviceSerial of deviceSerials) {
+            if (!deviceSerial || typeof deviceSerial !== 'string' || deviceSerial.trim().length === 0) {
+              continue;
+            }
+            this.socket?.emit('device_status_v2', deviceSerial);
+          }
+        }
+
         // LOG: Streaming started (only for initial connection)
         if (!isRoutineReconnect) {
           this.log.info('✓ Streaming connection established');
@@ -632,6 +668,73 @@ export class KumoAPI {
         if (callback) {
           callback(deviceSerial, data);
         }
+      });
+
+      // Additional event listeners for richer device data
+      this.socket.on('adapter_update', (data: any) => {
+        const serial = data.deviceSerial || 'unknown';
+        // Strip password before logging
+        const { password, ...safeData } = data;
+        this.log.debug(`Adapter update for ${serial}: fw=${safeData.firmwareVersion}, rssi=${safeData.routerRssi}`);
+        if (this.debugMode) {
+          this.log.debug(`Adapter update detail: ${JSON.stringify(safeData)}`);
+        }
+      });
+
+      this.socket.on('device_status_v2', (data: any) => {
+        const serial = data.deviceSerial;
+        if (!serial) {
+          return;
+        }
+        const isConnected = data.status !== 'disconnected';
+        const wasConnected = this.deviceConnectionStatus.get(serial);
+        this.deviceConnectionStatus.set(serial, isConnected);
+
+        if (!isConnected) {
+          this.log.warn(`Device ${serial} reported offline (reason: ${data.lastDisconnectedReason || 'unknown'})`);
+        } else {
+          this.log.debug(`Device status for ${serial}: ${data.status}`);
+        }
+
+        // Notify callbacks on status change
+        if (wasConnected !== isConnected) {
+          for (const callback of this.deviceConnectionCallbacks) {
+            callback(serial, isConnected);
+          }
+        }
+      });
+
+      this.socket.on('profile_update', (data: any) => {
+        const serial = data.deviceSerial;
+        if (!serial) {
+          return;
+        }
+
+        const profile: DeviceProfile = {
+          numberOfFanSpeeds: data.numberOfFanSpeeds ?? 3,
+          hasFanSpeedAuto: data.hasFanSpeedAuto ?? true,
+          hasModeDry: data.hasModeDry ?? false,
+          hasModeHeat: data.hasModeHeat ?? true,
+          hasModeVent: data.hasModeVent ?? false,
+          hasVaneDir: data.hasVaneDir ?? false,
+          hasVaneSwing: data.hasVaneSwing ?? false,
+          hasDefrost: data.hasDefrost ?? false,
+          hasStandby: data.hasStandby ?? false,
+          minimumSetPoints: data.minimumSetPoints ?? { cool: 16, heat: 16, auto: 16 },
+          maximumSetPoints: data.maximumSetPoints ?? { cool: 31, heat: 31, auto: 31 },
+        };
+
+        this.deviceProfiles.set(serial, profile);
+        this.log.debug(`Profile for ${serial}: temp range ${JSON.stringify(profile.minimumSetPoints)}-${JSON.stringify(profile.maximumSetPoints)}, fans=${profile.numberOfFanSpeeds}`);
+
+        for (const callback of this.deviceProfileCallbacks) {
+          callback(serial, profile);
+        }
+      });
+
+      this.socket.on('acoil_update', (data: any) => {
+        const serial = data.deviceSerial || 'unknown';
+        this.log.debug(`A-coil update for ${serial}`);
       });
 
       this.socket.on('disconnect', (reason) => {
@@ -679,6 +782,43 @@ export class KumoAPI {
 
   isStreamingConnected(): boolean {
     return this.socket?.connected || false;
+  }
+
+  // Profile and connection status callbacks
+  onDeviceProfileUpdate(callback: DeviceProfileCallback): void {
+    this.deviceProfileCallbacks.add(callback);
+  }
+
+  onDeviceConnectionStatusChange(callback: DeviceConnectionCallback): void {
+    this.deviceConnectionCallbacks.add(callback);
+  }
+
+  getDeviceProfile(deviceSerial: string): DeviceProfile | undefined {
+    return this.deviceProfiles.get(deviceSerial);
+  }
+
+  isDeviceConnected(deviceSerial: string): boolean {
+    return this.deviceConnectionStatus.get(deviceSerial) ?? true; // Assume connected if unknown
+  }
+
+  /**
+   * Extract user ID from the JWT access token payload.
+   */
+  private getUserIdFromToken(): string | null {
+    if (!this.accessToken) {
+      return null;
+    }
+    try {
+      const parts = this.accessToken.split('.');
+      if (parts.length < 2) {
+        return null;
+      }
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+      return payload.id ? String(payload.id) : null;
+    } catch {
+      this.log.debug('Failed to extract user ID from JWT');
+      return null;
+    }
   }
 
   /**
