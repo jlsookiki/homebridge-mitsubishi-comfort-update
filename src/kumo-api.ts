@@ -658,9 +658,7 @@ export class KumoAPI {
 
         if (this.debugMode) {
           this.log.debug(`Stream update for ${deviceSerial}: temp=${data.roomTemp}°C, mode=${data.operationMode}, power=${data.power}`);
-          // Log raw streaming update JSON to see all available fields
-          this.log.info(`  RAW Streaming Update JSON for ${deviceSerial}:`);
-          this.log.info(JSON.stringify(data, null, 2));
+          this.log.debug(`Stream update detail: ${JSON.stringify(data)}`);
         }
 
         // Trigger callbacks for this device

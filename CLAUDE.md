@@ -204,11 +204,26 @@ JWT tokens expire every 20 minutes. We handle this with:
 
 **URL:** `wss://socket-prod.kumocloud.com`
 
-**Events:**
-- Client → Server: `'subscribe'` with deviceSerial
-- Server → Client: `'device_update'` with full device state
+**Client → Server Emits:**
+| Emit | Arguments | Description |
+|------|-----------|-------------|
+| `subscribe` | `(deviceSerial)` | Subscribe to device updates |
+| `subscribe` | `('', userId)` | Account-level subscribe (needed for `adapter_update`) |
+| `force_adapter_request` | `(deviceSerial, 'iuStatus')` | Request indoor unit status |
+| `force_adapter_request` | `(deviceSerial, 'profile')` | Request device profile → triggers `profile_update` |
+| `force_adapter_request` | `(deviceSerial, 'adapterStatus')` | Request adapter info → triggers `adapter_update` |
+| `device_status_v2` | `(deviceSerial)` or `('')` | Request connection status |
 
-**Device Update Format:**
+**Server → Client Events:**
+| Event | Description |
+|-------|-------------|
+| `device_update` | Full device state (temperature, mode, setpoints, displayConfig) |
+| `profile_update` | Device capabilities (modes, fan speeds, setpoint limits) |
+| `device_status_v2` | Connection status (connected/disconnected) |
+| `adapter_update` | Adapter hardware (firmware, WiFi RSSI — contains password, strip before logging) |
+| `acoil_update` | A-coil/outdoor unit data (minimal: serial + date) |
+
+**`device_update` Format:**
 ```typescript
 {
   id: string
@@ -224,9 +239,24 @@ JWT tokens expire every 20 minutes. We handle this with:
   humidity: number | null
   connected: boolean
   rssi: number
-  // ... more fields
+  modelNumber: string                  // e.g. "SVZ-KP30NA"
+  previousOperationMode: string
+  displayConfig: {
+    filter: boolean                    // filter needs cleaning (= filterDirty in local API)
+    defrost: boolean                   // defrost cycle active
+    standby: boolean                   // compressor idle
+    hotAdjust: boolean
+  }
+  // Also includes: isSimulator, ledDisabled, isHeadless, scheduleOwner,
+  // scheduleHoldEndTime, activeThermistor, tempSource, twoFiguresCode,
+  // unusualFigures, statusDisplay, runTest, lastStatusChangeAt, createdAt, updatedAt, timeZone
 }
 ```
+
+**Field documentation sourced from:** [dlarrick/hass-kumo](https://github.com/dlarrick/hass-kumo),
+[EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws), and
+[dlarrick/pykumo](https://github.com/dlarrick/pykumo) (`Cloud_api_v3.md`).
+See `API-EXPLORATION-FINDINGS.md` for full field reference including `profile_update` and `adapter_update` payloads.
 
 ## Configuration
 
@@ -278,6 +308,8 @@ JWT tokens expire every 20 minutes. We handle this with:
 | CurrentHeatingCoolingState | power + operationMode | OFF/HEAT/COOL |
 | TargetHeatingCoolingState | operationMode | OFF/HEAT/COOL/AUTO |
 | CurrentRelativeHumidity | humidity | Optional sensor |
+| FilterChangeIndication | displayConfig.filter | From streaming only |
+| Model (AccessoryInformation) | modelNumber | Set once from streaming |
 
 ## Development Notes
 
@@ -344,7 +376,7 @@ When making changes, verify:
 
 ## Version History
 
-- **1.3.6** (unreleased) - Additional Socket.IO events, profile-based setpoint limits, offline detection (March 2026)
+- **1.3.6** (unreleased) - Streaming events, device profiles, filter maintenance, model number (March 2026)
   - Listen for `profile_update`, `device_status_v2`, `adapter_update`, `acoil_update` streaming events
   - Account-level Socket.IO subscription + `force_adapter_request` emits to trigger profile/status data
   - JWT user ID extraction for account-level subscribe (required for adapter_update events)
@@ -352,7 +384,12 @@ When making changes, verify:
   - HomeKit TargetTemperature now enforces correct min/max from device profile (e.g., 17-30°C)
   - Devices report "Not Responding" in HomeKit when `device_status_v2` reports disconnected
   - Adapter firmware version and WiFi RSSI logged (password stripped from logs)
-  - Code: `kumo-api.ts:34-39, 616-742`, `accessory.ts:66-115, 347-355`, `settings.ts:83-95`
+  - HomeKit FilterMaintenance service shows filter dirty status from `displayConfig.filter`
+  - Model number extracted from streaming `device_update` and set on AccessoryInformation
+  - Extended `DeviceStatus` with `modelNumber`, `connected`, `standby`, `defrost`, `filterDirty`
+  - Cleaned up verbose raw JSON logging (debug-level only)
+  - Streaming field documentation sourced from [hass-kumo](https://github.com/dlarrick/hass-kumo) / [ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws) / [pykumo](https://github.com/dlarrick/pykumo)
+  - Code: `kumo-api.ts:34-39, 616-742`, `accessory.ts:21-22, 123-200`, `settings.ts:7, 81-86`
 - **1.3.5** - Token refresh jitter to prevent rate limits (January 2026)
   - Added random 0-60 second jitter to token refresh timing
   - Prevents predictable API calls that trigger 429 rate limit errors

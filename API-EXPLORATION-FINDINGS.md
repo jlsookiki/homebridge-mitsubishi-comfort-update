@@ -246,6 +246,144 @@ Even with valid credentials. Wait 15-30 minutes between testing sessions.
 - Health monitoring with automatic fallback to polling
 - 95% reduction in API calls when streaming is healthy
 
+### Socket.IO Streaming Events
+
+The following events are available on the Socket.IO connection. Field documentation sourced from
+[dlarrick/hass-kumo](https://github.com/dlarrick/hass-kumo) and the related
+[EnumC/ha_kumo_ws](https://github.com/EnumC/ha_kumo_ws) (V3 cloud API integration) and
+[dlarrick/pykumo](https://github.com/dlarrick/pykumo) (`Cloud_api_v3.md`).
+
+#### `device_update`
+Primary device state event. Sent when device state changes and on initial subscription.
+
+**Key Fields:**
+```json
+{
+  "id": "string",
+  "deviceSerial": "string",
+  "roomTemp": 21.5,
+  "spHeat": 20,
+  "spCool": 24,
+  "spAuto": null,
+  "power": 1,
+  "operationMode": "heat",
+  "previousOperationMode": "heat",
+  "fanSpeed": "auto",
+  "airDirection": "auto",
+  "humidity": 45,
+  "rssi": -55,
+  "connected": true,
+  "modelNumber": "SVZ-KP30NA",
+  "displayConfig": {
+    "filter": false,
+    "defrost": false,
+    "hotAdjust": false,
+    "standby": false
+  },
+  "isSimulator": false,
+  "ledDisabled": false,
+  "isHeadless": false,
+  "scheduleOwner": "adapter",
+  "scheduleHoldEndTime": 0,
+  "activeThermistor": "string",
+  "tempSource": "string",
+  "twoFiguresCode": "string",
+  "unusualFigures": "string",
+  "statusDisplay": "string",
+  "runTest": "string",
+  "lastStatusChangeAt": "ISO 8601",
+  "createdAt": "ISO 8601",
+  "updatedAt": "ISO 8601",
+  "timeZone": "string"
+}
+```
+
+**`displayConfig` field mapping (V3 cloud vs local API):**
+| V3 Cloud / Streaming | Local API (pykumo) | Description |
+|----------------------|-------------------|-------------|
+| `displayConfig.filter` | `indoorUnit.status.filterDirty` | Filter needs cleaning |
+| `displayConfig.defrost` | `indoorUnit.status.defrost` | Defrost cycle active |
+| `displayConfig.standby` | `indoorUnit.status.standby` | Compressor idle / standby |
+| `displayConfig.hotAdjust` | — | Hot adjust active |
+
+#### `device_status_v2`
+Connection status for devices. Sent in response to `device_status_v2` emit.
+
+```json
+{
+  "deviceSerial": "string",
+  "status": "connected",
+  "lastTimeConnected": "ISO 8601",
+  "lastDisconnectedReason": "string"
+}
+```
+
+Status values: `"connected"` or `"disconnected"`.
+
+#### `profile_update`
+Device capability profile. Sent in response to `force_adapter_request(serial, 'profile')`.
+
+```json
+{
+  "deviceSerial": "string",
+  "numberOfFanSpeeds": 3,
+  "hasFanSpeedAuto": true,
+  "hasModeDry": true,
+  "hasModeHeat": true,
+  "hasModeVent": true,
+  "hasVaneDir": false,
+  "hasVaneSwing": false,
+  "hasDefrost": true,
+  "hasStandby": true,
+  "hasHotAdjust": true,
+  "hasInitialSettings": false,
+  "hasModeTest": true,
+  "extendedTemps": true,
+  "usesSetPointInDryMode": true,
+  "minimumSetPoints": { "cool": 19, "heat": 17, "auto": 19 },
+  "maximumSetPoints": { "cool": 30, "heat": 28, "auto": 28 }
+}
+```
+
+#### `adapter_update`
+Adapter hardware info. Sent in response to `force_adapter_request(serial, 'adapterStatus')`.
+
+```json
+{
+  "deviceSerial": "string",
+  "firmwareVersion": "string",
+  "routerRssi": -55,
+  "password": "REDACTED",
+  "minSetpoint": 17,
+  "maxSetpoint": 28,
+  "roomTempDisplayOffset": 0
+}
+```
+
+**Note:** Contains WiFi password — always strip before logging.
+
+#### `acoil_update`
+Minimal event for A-coil (outdoor unit) data.
+
+```json
+{
+  "deviceSerial": "string",
+  "date": "ISO 8601"
+}
+```
+
+### Socket.IO Client Emits
+
+| Emit | Arguments | Description |
+|------|-----------|-------------|
+| `subscribe` | `(deviceSerial)` | Subscribe to device updates |
+| `subscribe` | `('', userId)` | Account-level subscribe (needed for `adapter_update`) |
+| `force_adapter_request` | `(deviceSerial, 'iuStatus')` | Request indoor unit status |
+| `force_adapter_request` | `(deviceSerial, 'profile')` | Request device profile |
+| `force_adapter_request` | `(deviceSerial, 'adapterStatus')` | Request adapter hardware info |
+| `device_status_v2` | `(deviceSerial)` | Request device connection status |
+| `device_status_v2` | `('')` | Request all device connection statuses |
+
 ---
 
 ## Conclusion

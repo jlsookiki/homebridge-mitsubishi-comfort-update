@@ -18,6 +18,8 @@ export class KumoThermostatAccessory {
   private hasReceivedValidUpdate: boolean = false;
   private deviceProfile: DeviceProfile | null = null;
   private isDeviceOnline: boolean = true;
+  private filterMaintenanceService: Service | null = null;
+  private modelNumberSet: boolean = false;
 
   constructor(
     private readonly platform: KumoV3Platform,
@@ -118,6 +120,22 @@ export class KumoThermostatAccessory {
     );
   }
 
+  private updateFilterMaintenance(filterDirty: boolean): void {
+    if (!this.filterMaintenanceService) {
+      this.filterMaintenanceService =
+        this.accessory.getService(this.platform.Service.FilterMaintenance) ||
+        this.accessory.addService(this.platform.Service.FilterMaintenance);
+      this.platform.log.debug(`Added FilterMaintenance service for ${this.accessory.displayName}`);
+    }
+
+    this.filterMaintenanceService.updateCharacteristic(
+      this.platform.Characteristic.FilterChangeIndication,
+      filterDirty
+        ? this.platform.Characteristic.FilterChangeIndication.CHANGE_FILTER
+        : this.platform.Characteristic.FilterChangeIndication.FILTER_OK,
+    );
+  }
+
   // Handle streaming updates
   private handleStreamingUpdate(deviceSerial: string, data: Partial<DeviceStatus>) {
     // Validate that we have essential data before processing
@@ -157,6 +175,29 @@ export class KumoThermostatAccessory {
 
     // Use existing update processing logic
     this.processZoneUpdate(zoneUpdate as Zone, 'streaming', updateTimestamp);
+
+    // Extract extended fields only available from streaming (not in Zone format)
+    if (this.currentStatus) {
+      this.currentStatus.modelNumber = (data as any).modelNumber;
+      this.currentStatus.connected = (data as any).connected;
+      const displayConfig = (data as any).displayConfig;
+      if (displayConfig) {
+        this.currentStatus.filterDirty = displayConfig.filter === true;
+        this.currentStatus.defrost = displayConfig.defrost === true;
+        this.currentStatus.standby = displayConfig.standby === true;
+      }
+
+      // Set model number once on AccessoryInformation
+      if (!this.modelNumberSet && this.currentStatus.modelNumber) {
+        this.accessory.getService(this.platform.Service.AccessoryInformation)!
+          .setCharacteristic(this.platform.Characteristic.Model, this.currentStatus.modelNumber);
+        this.modelNumberSet = true;
+        this.platform.log.info(`${this.accessory.displayName}: Model ${this.currentStatus.modelNumber}`);
+      }
+
+      // Update filter maintenance service
+      this.updateFilterMaintenance(this.currentStatus.filterDirty ?? false);
+    }
   }
 
   // Getter methods for platform to access private properties
