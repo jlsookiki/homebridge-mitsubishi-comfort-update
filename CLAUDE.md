@@ -6,7 +6,7 @@ This document provides context about the homebridge-mitsubishi-comfort plugin ar
 
 This is a Homebridge plugin for Mitsubishi heat pumps using the Kumo Cloud v3 API. It provides HomeKit integration for controlling Mitsubishi mini-split systems.
 
-**Current Version:** 1.3.5 (1.3.6 unreleased on main)
+**Current Version:** 1.3.6
 
 ## Architecture Overview
 
@@ -376,7 +376,7 @@ When making changes, verify:
 
 ## Version History
 
-- **1.3.6** (unreleased) - Streaming events, device profiles, filter maintenance, model number (March 2026)
+- **1.3.6** - Streaming events, device profiles, filter maintenance, model number (March 2026)
   - Listen for `profile_update`, `device_status_v2`, `adapter_update`, `acoil_update` streaming events
   - Account-level Socket.IO subscription + `force_adapter_request` emits to trigger profile/status data
   - JWT user ID extraction for account-level subscribe (required for adapter_update events)
