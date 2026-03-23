@@ -365,14 +365,10 @@ export class KumoThermostatAccessory {
         return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
       case 'autoCool':
         return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'auto': {
-        // Plain auto mode — infer from temperature comparison, default to HEAT when at target
-        const targetTemp = this.getTargetTempFromStatus(status);
-        if (status.roomTemp > targetTemp) {
-          return this.platform.Characteristic.CurrentHeatingCoolingState.COOL;
-        }
-        return this.platform.Characteristic.CurrentHeatingCoolingState.HEAT;
-      }
+      case 'auto':
+        // Plain auto mode means idle — not actively heating or cooling
+        // (autoHeat/autoCool are reported when actively running)
+        return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
       case 'off':
       default:
         return this.platform.Characteristic.CurrentHeatingCoolingState.OFF;
