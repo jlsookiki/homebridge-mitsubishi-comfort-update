@@ -57,6 +57,14 @@ export class KumoThermostatAccessory {
       .onGet(this.getTargetTemperature.bind(this))
       .onSet(this.setTargetTemperature.bind(this));
 
+    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+      .onGet(this.getHeatingThreshold.bind(this))
+      .onSet(this.setHeatingThreshold.bind(this));
+
+    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
+      .onGet(this.getCoolingThreshold.bind(this))
+      .onSet(this.setCoolingThreshold.bind(this));
+
     // Note: TemperatureDisplayUnits characteristic is not exposed since the temperature
     // unit preference is account-wide in Kumo Cloud, not per-device
 
@@ -98,10 +106,28 @@ export class KumoThermostatAccessory {
         minStep: 0.5,
       });
 
+    this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
+      .setProps({
+        minValue: profile.minimumSetPoints.heat,
+        maxValue: profile.maximumSetPoints.heat,
+        minStep: 0.5,
+      });
+
+    this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
+      .setProps({
+        minValue: profile.minimumSetPoints.cool,
+        maxValue: profile.maximumSetPoints.cool,
+        minStep: 0.5,
+      });
+
     const minTempF = (minTemp * 9 / 5) + 32;
     const maxTempF = (maxTemp * 9 / 5) + 32;
     this.platform.log.info(
       `${this.accessory.displayName}: Set temperature range ${minTemp}-${maxTemp}°C (${minTempF}-${maxTempF}°F)`,
+    );
+    this.platform.log.info(
+      `${this.accessory.displayName}: Heating threshold ${profile.minimumSetPoints.heat}-${profile.maximumSetPoints.heat}°C, ` +
+      `Cooling threshold ${profile.minimumSetPoints.cool}-${profile.maximumSetPoints.cool}°C`,
     );
   }
 
@@ -294,6 +320,20 @@ export class KumoThermostatAccessory {
         this.service.updateCharacteristic(
           this.platform.Characteristic.TargetTemperature,
           targetTemp,
+        );
+      }
+
+      // Update threshold temperatures for auto mode range
+      if (status.spHeat !== undefined && status.spHeat !== null && !isNaN(status.spHeat)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.HeatingThresholdTemperature,
+          status.spHeat,
+        );
+      }
+      if (status.spCool !== undefined && status.spCool !== null && !isNaN(status.spCool)) {
+        this.service.updateCharacteristic(
+          this.platform.Characteristic.CoolingThresholdTemperature,
+          status.spCool,
         );
       }
 
@@ -548,6 +588,54 @@ export class KumoThermostatAccessory {
     }
   }
 
+
+  async getHeatingThreshold(): Promise<CharacteristicValue> {
+    const temp = this.currentStatus?.spHeat ?? 20;
+    this.platform.log.debug(`Get HeatingThresholdTemperature: ${temp}°C`);
+    return temp;
+  }
+
+  async setHeatingThreshold(value: CharacteristicValue) {
+    const temp = value as number;
+    this.platform.log.info(`[THRESHOLD] ${this.accessory.displayName}: Setting heating threshold to ${temp}°C`);
+
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { spHeat: temp });
+    if (success) {
+      if (this.currentStatus) {
+        this.currentStatus.spHeat = temp;
+      }
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.HeatingThresholdTemperature,
+        temp,
+      );
+    } else {
+      this.platform.log.error(`Failed to set heating threshold for ${this.accessory.displayName}`);
+    }
+  }
+
+  async getCoolingThreshold(): Promise<CharacteristicValue> {
+    const temp = this.currentStatus?.spCool ?? 24;
+    this.platform.log.debug(`Get CoolingThresholdTemperature: ${temp}°C`);
+    return temp;
+  }
+
+  async setCoolingThreshold(value: CharacteristicValue) {
+    const temp = value as number;
+    this.platform.log.info(`[THRESHOLD] ${this.accessory.displayName}: Setting cooling threshold to ${temp}°C`);
+
+    const success = await this.kumoAPI.sendCommand(this.deviceSerial, { spCool: temp });
+    if (success) {
+      if (this.currentStatus) {
+        this.currentStatus.spCool = temp;
+      }
+      this.service.updateCharacteristic(
+        this.platform.Characteristic.CoolingThresholdTemperature,
+        temp,
+      );
+    } else {
+      this.platform.log.error(`Failed to set cooling threshold for ${this.accessory.displayName}`);
+    }
+  }
 
   async getCurrentRelativeHumidity(): Promise<CharacteristicValue> {
     if (!this.currentStatus) {
