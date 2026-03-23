@@ -103,21 +103,21 @@ export class KumoThermostatAccessory {
       .setProps({
         minValue: minTemp,
         maxValue: maxTemp,
-        minStep: 0.5,
+        minStep: 0.1,
       });
 
     this.service.getCharacteristic(this.platform.Characteristic.HeatingThresholdTemperature)
       .setProps({
         minValue: profile.minimumSetPoints.heat,
         maxValue: profile.maximumSetPoints.heat,
-        minStep: 0.5,
+        minStep: 0.1,
       });
 
     this.service.getCharacteristic(this.platform.Characteristic.CoolingThresholdTemperature)
       .setProps({
         minValue: profile.minimumSetPoints.cool,
         maxValue: profile.maximumSetPoints.cool,
-        minStep: 0.5,
+        minStep: 0.1,
       });
 
     const minTempF = (minTemp * 9 / 5) + 32;
